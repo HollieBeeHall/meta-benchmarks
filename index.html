@@ -347,6 +347,9 @@ const CONFIG = {
   ATTRIBUTION: ['7d_click', '1d_view'],   // same window for every account
 
   // Benchmark rules
+  AGENCY_BUSINESS_NAMES: ['This is GAIN'],  // owning businesses that are us, not the client
+  SUGGEST_DAYS: 90,            // look-back for suggested market / model / AOV band
+  MARKET_SHARE: 0.75,          // top country needs this share of spend, else Multi-market
   MIN_CLIENTS: 5,              // hide a benchmark unless at least this many peer clients qualify
   MIN_SPEND_GBP: 500,          // a peer needs this much spend in the period to count
   MIN_PURCHASES: 10,           // ...and this many purchases for purchase-based metrics
@@ -505,7 +508,22 @@ async function readSource(url, key){
   }
   return null;
 }
+async function loadFX(){
+  S.fx = { GBP: 1 }; S.fxError = null;
+  S.fxSource = null;
+  try {
+    const fs = await readSource(CONFIG.FX_CSV_URL, LOCAL_KEYS.fx);
+    if (fs) {
+      S.fxSource = fs;
+      csvObjects(fs.text).forEach(o => {
+        const c = (o.currency || '').toUpperCase(), v = num(o.rate_to_gbp);
+        if (c && v > 0) S.fx[c] = v;
+      });
+    } else S.fxError = 'No fx.csv loaded, so only GBP accounts can be converted.';
+  } catch(e) { S.fxError = 'Could not read the FX file: ' + e.message; }
+}
 async function loadSheet(){
+  await loadFX();
   const src = await readSource(CONFIG.ACCOUNTS_CSV_URL, LOCAL_KEYS.accounts);
   if (!src) throw new Error('No lookup file loaded yet. On the Setup tab, choose your accounts.csv and fx.csv exports.');
   S.source = src;
@@ -532,35 +550,23 @@ async function loadSheet(){
   });
   S.byId = {}; S.accounts.forEach(a => { if (!S.byId[a.id]) S.byId[a.id] = a; });
 
-  S.fx = { GBP: 1 }; S.fxError = null;
-  S.fxSource = null;
-  try {
-    const fs = await readSource(CONFIG.FX_CSV_URL, LOCAL_KEYS.fx);
-    if (fs) {
-      S.fxSource = fs;
-      csvObjects(fs.text).forEach(o => {
-        const c = (o.currency || '').toUpperCase(), v = num(o.rate_to_gbp);
-        if (c && v > 0) S.fx[c] = v;
-      });
-    } else S.fxError = 'No fx.csv loaded, so only GBP accounts can be converted.';
-  } catch(e) { S.fxError = 'Could not read the FX file: ' + e.message; }
   S.loadedAt = new Date();
 }
 
 async function loadMetaAccounts(){
   META.byId = {}; META.listed = []; META.listError = null;
   try {
-    const list = await fetchAllPages('me/adaccounts', { fields: 'account_id,name,currency,account_status', limit: 200 });
+    const list = await fetchAllPages('me/adaccounts', { fields: 'account_id,name,currency,account_status,business{name}', limit: 200 });
     list.forEach(a => {
-      META.byId[a.account_id] = { name: a.name, currency: a.currency, status: a.account_status, listed: true };
+      META.byId[a.account_id] = { name: a.name, currency: a.currency, status: a.account_status, business: a.business?.name || '', listed: true };
       META.listed.push(a.account_id);
     });
   } catch(e) { META.listError = e.message; }
   const missing = S.accounts.filter(a => !META.byId[a.id]);
   await pool(missing, CONFIG.CONCURRENCY, async a => {
     try {
-      const j = await graphGet('act_' + a.id, { fields: 'account_id,name,currency,account_status' });
-      META.byId[a.id] = { name: j.name, currency: j.currency, status: j.account_status, listed: false };
+      const j = await graphGet('act_' + a.id, { fields: 'account_id,name,currency,account_status,business{name}' });
+      META.byId[a.id] = { name: j.name, currency: j.currency, status: j.account_status, business: j.business?.name || '', listed: false };
     } catch(e) { META.byId[a.id] = { error: e.message }; }
   });
 }
@@ -1372,6 +1378,95 @@ function tbl(head, rows, empty){
   if (!rows.length) return `<p class="hint">${empty}</p>`;
   return `<div class="table-wrap"><table><thead><tr>${head.map(x => `<th>${x}</th>`).join('')}</tr></thead><tbody>${rows.map(r => `<tr>${r.map(c => `<td>${c}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`;
 }
+// ── Suggested rows from Meta ──────────────────────────────────────
+const SUG = { rows: null, msg: '' };
+const SHEET_COLS = ['account_id','account_name','client','industry','sub_vertical','business_model','market','aov_band','include_in_benchmarks','custom_conversion_id','custom_conversion_label','custom_conversion_target_gbp','notes'];
+const LEAD_TYPES = ['lead', 'onsite_conversion.lead_grouped', 'offsite_conversion.fb_pixel_lead'];
+const APP_TYPES = ['mobile_app_install', 'app_install', 'omni_app_install'];
+const COUNTRY_WORDS = ['uk','gb','us','usa','de','fr','ie','nl','au','ca','nz','es','it','se','dk','no','ch','at','be','pl','in','ph','sg','ae','za','jp','eu','emea','apac','row','global','intl','international',
+  'united kingdom','united states','germany','france','ireland','netherlands','australia','canada','spain','italy','sweden','denmark','norway','switzerland','austria','belgium','poland','india','philippines','singapore','japan',
+  'ad account','ads account','account','meta','facebook','fb','ig','instagram','ads','paid social','social','main','new'];
+function guessClient(name, business){
+  if (business && !CONFIG.AGENCY_BUSINESS_NAMES.some(b => b.toLowerCase() === business.toLowerCase())) return business;
+  let n = ' ' + (name || '') + ' ';
+  n = n.replace(/[()\[\]{}]/g, ' ');
+  COUNTRY_WORDS.slice().sort((a,b) => b.length - a.length).forEach(w => { n = n.replace(new RegExp('(^|[\\s|_\\-–—:/.,])' + w.replace(/ /g,'\\s+') + '(?=$|[\\s|_\\-–—:/.,])', 'gi'), ' '); });
+  return n.replace(/[\s|_\-–—:/.,]+/g, ' ').trim();
+}
+function aovBand(gbp){
+  if (gbp == null) return '';
+  if (gbp < 25) return 'Under £25'; if (gbp < 50) return '£25–50'; if (gbp < 100) return '£50–100';
+  if (gbp < 250) return '£100–250'; if (gbp < 500) return '£250–500'; return '£500+';
+}
+async function runSuggest(){
+  if (!TOKEN) { SUG.msg = 'Add a token first.'; renderSetup(); return; }
+  const ids = [...new Set([...META.listed, ...S.accounts.map(a => a.id)])].filter(id => accessible(id));
+  const until = new Date(); until.setDate(until.getDate() - 1);
+  const since = new Date(until); since.setDate(since.getDate() - (CONFIG.SUGGEST_DAYS - 1));
+  const tr = JSON.stringify({ since: isoDate(since), until: isoDate(until) });
+  const btn = $('suggest-run'); if (btn) btn.disabled = true;
+  let done = 0; const rows = [];
+  await pool(ids, CONFIG.CONCURRENCY, async id => {
+    const m = META.byId[id] || {}, sheet = S.byId[id];
+    let byCountry = [], err = '';
+    try {
+      byCountry = await fetchAllPages(`act_${id}/insights`, { level: 'account', breakdowns: 'country', time_range: tr, fields: 'spend,actions,action_values', ...ATTR_PARAMS, limit: 500 });
+    } catch(e) { err = e.message; }
+    let spend = 0, pur = 0, rev = 0, leads = 0, apps = 0; const ctry = {};
+    byCountry.forEach(r => {
+      const s = parseFloat(r.spend) || 0; spend += s;
+      const c = (r.country || '').toUpperCase(); ctry[c] = (ctry[c] || 0) + s;
+      pur += actionVal(r.actions, PURCHASE_TYPES); rev += actionVal(r.action_values, PURCHASE_TYPES);
+      leads += actionVal(r.actions, LEAD_TYPES); apps += actionVal(r.actions, APP_TYPES);
+    });
+    const top = Object.entries(ctry).sort((a,b) => b[1] - a[1])[0];
+    const share = top && spend ? top[1] / spend : 0;
+    const market = !top ? '' : share >= CONFIG.MARKET_SHARE ? (top[0] === 'GB' ? 'UK' : top[0]) : 'Multi-market';
+    const model = pur >= 1 ? 'Ecommerce' : leads >= 1 ? 'Lead gen' : apps >= 1 ? 'App' : '';
+    const rate = m.currency ? S.fx[m.currency.toUpperCase()] : undefined;
+    const aov = pur >= CONFIG.MIN_PURCHASES && rev > 0 && rate != null ? aovBand(rev / pur * rate) : '';
+    const sug = { client: guessClient(m.name, m.business), market, model, aov, include: spend > 0 ? 'Yes' : 'No' };
+    const keep = (k, v) => (sheet && sheet[k]) ? sheet[k] : v;
+    rows.push({
+      id, metaName: m.name || '', share, spendLocal: spend, currency: m.currency || '', err, sug, inSheet: !!sheet,
+      out: {
+        account_id: id, account_name: sheet?.label || '', client: keep('client', sug.client), industry: sheet?.industry || '',
+        sub_vertical: sheet?.sub || '', business_model: keep('model', sug.model), market: keep('market', sug.market),
+        aov_band: keep('aov', sug.aov), include_in_benchmarks: sheet?.includeRaw || sug.include,
+        custom_conversion_id: sheet?.ccId || '', custom_conversion_label: sheet?.ccId ? sheet.ccLabel : '',
+        custom_conversion_target_gbp: sheet?.ccTarget ?? '', notes: sheet?.notes || '',
+      },
+    });
+    done++; setText('suggest-msg', `Checked ${done} of ${ids.length} accounts…`);
+  });
+  rows.sort((a,b) => (a.out.client || 'zzz').localeCompare(b.out.client || 'zzz') || a.out.market.localeCompare(b.out.market));
+  SUG.rows = rows;
+  const nErr = rows.filter(r => r.err).length;
+  SUG.msg = `${rows.length} accounts checked${nErr ? `, ${nErr} failed` : ''}. Check the suggestions, then copy them into the sheet.`;
+  renderSetup();
+}
+function suggestTableHTML(){
+  const cell = (v, fromSheet) => v ? `${esc(v)}${fromSheet ? ' <span class="hint">(sheet)</span>' : ''}` : '<span class="hint">—</span>';
+  return tbl(['Account', 'Client', 'Market', 'Model', 'AOV band', `Spend (${CONFIG.SUGGEST_DAYS}d)`, 'Industry'],
+    SUG.rows.map(r => {
+      const sh = S.byId[r.id] || {};
+      return [
+        `${esc(r.metaName || r.id)}<div class="hint">${esc(r.id)}</div>${r.err ? `<div class="hint cf-red">${esc(r.err)}</div>` : ''}`,
+        cell(r.out.client, !!sh.client),
+        cell(r.out.market, !!sh.market) + (r.share && !sh.market ? `<div class="hint">top country ${Math.round(r.share * 100)}% of spend</div>` : ''),
+        cell(r.out.business_model, !!sh.model),
+        cell(r.out.aov_band, !!sh.aov),
+        r.spendLocal ? `${fmt(r.spendLocal, 0)} ${esc(r.currency)}` : '<span class="hint">No spend</span>',
+        r.out.industry ? esc(r.out.industry) : '<span class="cf-yellow">To fill in</span>',
+      ];
+    }), 'No accounts found.');
+}
+function suggestTSV(){ return SUG.rows.map(r => SHEET_COLS.map(c => String(r.out[c] ?? '').replace(/[\t\n]/g, ' ')).join('\t')).join('\n'); }
+function suggestCSV(){
+  const q = v => { const s = String(v ?? ''); return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; };
+  return [SHEET_COLS.join(','), ...SUG.rows.map(r => SHEET_COLS.map(c => q(r.out[c])).join(','))].join('\n');
+}
+
 function srcLine(src, label){
   if (!src) return '';
   const when = src.savedAt ? new Date(src.savedAt).toLocaleString('en-GB', {day:'numeric', month:'short', hour:'2-digit', minute:'2-digit'}) : '';
@@ -1422,6 +1517,16 @@ function renderSetup(){
   h += `<h3 class="sec"><strong>Access</strong> <em>and currency issues (${problems.length})</em></h3>`;
   h += tbl(['Account ID', 'Client', 'Issue'], problems, 'None.');
 
+  // E: build rows from Meta
+  h += `<h3 class="sec"><strong>Build rows</strong> <em>from Meta</em></h3>
+    <p class="hint" style="margin-bottom:8px">Suggests client, market, business model and AOV band for every account your token can see, from the last ${CONFIG.SUGGEST_DAYS} days of spend. Values already in your sheet are kept; suggestions only fill blanks. You then add industry.</p>
+    <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-bottom:8px">
+      <button class="btn" id="suggest-run">${SUG.rows ? 'Run again' : 'Build rows from Meta'}</button>
+      ${SUG.rows ? '<button class="btn ghost" id="suggest-copy">Copy rows for the sheet</button><button class="btn ghost" id="suggest-dl">Download as CSV</button>' : ''}
+      <span class="hint" id="suggest-msg">${esc(SUG.msg || '')}</span>
+    </div>
+    <div id="suggest-table">${SUG.rows ? suggestTableHTML() : ''}</div>`;
+
   // D: coverage by industry
   const cov = {};
   S.accounts.filter(benchEligible).forEach(a => { (cov[a.industry] ||= new Set()).add(a.client); });
@@ -1444,6 +1549,16 @@ function renderSetup(){
     setText('csv-msg', msgs.join(' · '));
     await boot(true);
   });
+  $('suggest-run')?.addEventListener('click', runSuggest);
+  $('suggest-copy')?.addEventListener('click', async () => {
+    try { await navigator.clipboard.writeText(suggestTSV()); setText('suggest-msg', `Copied ${SUG.rows.length} rows. Click cell A2 on the Accounts tab and paste.`); }
+    catch { setText('suggest-msg', 'Copy failed. Use Download as CSV instead.'); }
+  });
+  $('suggest-dl')?.addEventListener('click', () => {
+    const blob = new Blob([suggestCSV()], { type: 'text/csv' });
+    const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'accounts_from_meta.csv';
+    document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+  });
   $('forget-files')?.addEventListener('click', () => {
     try { localStorage.removeItem(LOCAL_KEYS.accounts); localStorage.removeItem(LOCAL_KEYS.fx); } catch {}
     boot(true);
@@ -1463,7 +1578,12 @@ async function boot(reload = false){
   setStatus('<div class="dot-loader"><span></span><span></span><span></span></div> Loading lookup sheet…');
   S.error = null;
   try { await loadSheet(); }
-  catch(e) { S.error = e.message; setStatus(esc(e.message) + '<br>See the Setup tab.', true); showView('setup'); return; }
+  catch(e) {
+    S.error = e.message; S.accounts = []; S.byId = {}; S.dupes = [];
+    if (TOKEN) await loadMetaAccounts();
+    buildClientPicker(); buildMarketNav();
+    setStatus(esc(e.message) + '<br>See the Setup tab.', true); showView('setup'); return;
+  }
   if (!TOKEN) { buildClientPicker(); setStatus('No access token found. Open this page with ?token=YOUR_TOKEN on the end of the address, or paste one on the Setup tab.', true); showView('setup'); return; }
   setStatus('<div class="dot-loader"><span></span><span></span><span></span></div> Checking Meta account access…');
   await loadMetaAccounts();
