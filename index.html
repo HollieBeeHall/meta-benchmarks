@@ -285,7 +285,7 @@
         </select></div>
       <div><label for="bf-industry">Industry</label><select class="ctl" id="bf-industry"></select></div>
       <div><label for="bf-sub">Sub-vertical</label><select class="ctl" id="bf-sub"></select></div>
-      <div><label for="bf-market">Market</label><select class="ctl" id="bf-market"></select></div>
+      <div><label>Market</label><div class="ms-wrap" id="bf-market"></div></div>
       <div><label for="bf-model">Business model</label><select class="ctl" id="bf-model"></select></div>
       <div><label for="bf-aov">AOV band</label><select class="ctl" id="bf-aov"></select></div>
       <div><label for="bf-objective">Campaign objective</label><select class="ctl" id="bf-objective"></select></div>
@@ -303,7 +303,7 @@
       <div class="chart-card" id="trend-card">
         <div class="chart-head">
           <select class="ctl" id="trend-metric" style="width:auto"></select>
-          <div class="legend"><span><i style="border-color:var(--series-client)"></i><span id="lg-client">Client</span></span><span><i style="border-color:var(--series-peer);border-top-style:dashed"></i>Peer median</span><span><i class="band"></i>Peer middle 50% (P25–P75)</span></div>
+          <div class="legend"><span><i style="border-color:var(--series-client)"></i><span id="lg-client">Client</span></span><span><i style="border-color:var(--series-peer);border-top-style:dashed"></i>Peer average</span><span><i class="band"></i>Typical range (lower-half to upper-half average)</span></div>
           <button class="btn ghost" id="trend-table-btn" style="margin-left:auto;padding:6px 10px;font-size:12px">Show table</button>
         </div>
         <div id="trend-chart"></div>
@@ -312,7 +312,7 @@
       </div>
 
       <h3 class="sec"><strong>Industry</strong> <em>overview</em></h3>
-      <p class="hint" style="margin-bottom:8px">Median client by industry, using the market, model, AOV and objective filters above. Includes every client. Click a row to filter to that industry.</p>
+      <p class="hint" style="margin-bottom:8px">Average client by industry, using the market, model, AOV and objective filters above. Includes every client. Click a row to filter to that industry.</p>
       <div class="table-wrap"><table id="industry-table"></table></div>
     </div>
   </div>
@@ -351,6 +351,7 @@ const CONFIG = {
   SUGGEST_DAYS: 90,            // look-back for suggested market / model / AOV band
   MARKET_SHARE: 0.75,          // top country needs this share of spend, else Multi-market
   MIN_CLIENTS: 5,              // hide a benchmark unless at least this many peer clients qualify
+  MIN_PER_HALF: 2,             // typical range needs this many clients in each half (so 4+ peers)
   MIN_SPEND_GBP: 500,          // a peer needs this much spend in the period to count
   MIN_PURCHASES: 10,           // ...and this many purchases for purchase-based metrics
   MIN_SPEND_GBP_MONTH: 200,    // monthly trend: per-month minimums
@@ -1135,7 +1136,7 @@ function fillSelect(id, values, allLabel, keep){
 function uniq(key, rows = S.accounts){ return [...new Set(rows.map(a => a[key]).filter(Boolean))].sort((a,b) => a.localeCompare(b)); }
 function buildBenchFilterOptions(){
   fillSelect('bf-industry', uniq('industry'), 'All industries', true);
-  fillSelect('bf-market', uniq('market'), 'All markets', true);
+  buildMarketMulti(uniq('market'));
   fillSelect('bf-model', uniq('model'), 'All models', true);
   fillSelect('bf-aov', uniq('aov'), 'All AOV bands', true);
   buildSubOptions(true);
@@ -1163,19 +1164,56 @@ function resetBenchFiltersForClient(){
   pick('bf-industry', first ? one('industry') : '');
   buildSubOptions(false);
   pick('bf-sub', '');
-  pick('bf-market', '');
+  benchMarkets.clear(); buildMarketMulti(uniq('market'));
   pick('bf-model', first ? one('model') : '');
   pick('bf-aov', '');
 }
-['bf-industry','bf-sub','bf-market','bf-model','bf-aov','bf-objective'].forEach(id => $(id).addEventListener('change', () => {
+['bf-industry','bf-sub','bf-model','bf-aov','bf-objective'].forEach(id => $(id).addEventListener('change', () => {
   if (id === 'bf-industry') buildSubOptions(false);
   if (benchReady()) renderBench();
 }));
 function benchFilters(){
-  return { industry: $('bf-industry').value, sub: $('bf-sub').value, market: $('bf-market').value, model: $('bf-model').value, aov: $('bf-aov').value, objective: $('bf-objective').value };
+  return { industry: $('bf-industry').value, sub: $('bf-sub').value, markets: [...benchMarkets], model: $('bf-model').value, aov: $('bf-aov').value, objective: $('bf-objective').value };
 }
 function matchAttrs(a, f, ignore = []){
-  return ['industry','sub','market','model','aov'].every(k => ignore.includes(k) || !f[k] || a[k] === f[k]);
+  return ['industry','sub','model','aov'].every(k => ignore.includes(k) || !f[k] || a[k] === f[k])
+    && (ignore.includes('market') || !f.markets.length || f.markets.includes(a.market));
+}
+
+// ── Market multi-select (empty = all markets)
+const benchMarkets = new Set();
+function marketLabel(opts){
+  if (!benchMarkets.size) return 'All markets';
+  const sel = opts.filter(o => benchMarkets.has(o));
+  return sel.length <= 3 ? sel.join(' + ') : `${sel.length} markets`;
+}
+function buildMarketMulti(opts){
+  [...benchMarkets].forEach(m => { if (!opts.includes(m)) benchMarkets.delete(m); });
+  const wrap = $('bf-market'); wrap.innerHTML = '';
+  const tr = document.createElement('button'); tr.type = 'button'; tr.className = 'ms-trigger'; tr.id = 'mst-bfm';
+  tr.textContent = marketLabel(opts);
+  const dd = document.createElement('div'); dd.className = 'ms-dropdown'; dd.id = 'msd-bfm'; dd.onclick = e => e.stopPropagation();
+  tr.onclick = e => {
+    e.stopPropagation(); const open = dd.classList.contains('open'); closeAllDD();
+    if (!open) { dd.classList.add('open'); const r = tr.getBoundingClientRect(); dd.style.top = (r.bottom + 4) + 'px'; dd.style.left = r.left + 'px'; dd.style.width = Math.max(r.width, 200) + 'px'; }
+  };
+  const all = document.createElement('label'); all.className = 'ms-option all-opt';
+  all.innerHTML = `<input type="checkbox" ${benchMarkets.size ? '' : 'checked'}/><span>All markets</span>`;
+  all.querySelector('input').onchange = () => { benchMarkets.clear(); refresh(); };
+  dd.appendChild(all);
+  opts.forEach(o => {
+    const d = document.createElement('label'); d.className = 'ms-option';
+    d.innerHTML = `<input type="checkbox" ${benchMarkets.has(o) ? 'checked' : ''}/><span>${flagFor(o)} ${esc(o)}</span>`;
+    d.querySelector('input').onchange = e => { e.target.checked ? benchMarkets.add(o) : benchMarkets.delete(o); refresh(); };
+    dd.appendChild(d);
+  });
+  wrap.appendChild(tr); wrap.appendChild(dd);
+  function refresh(){
+    tr.textContent = marketLabel(opts);
+    all.querySelector('input').checked = !benchMarkets.size;
+    dd.querySelectorAll('.ms-option:not(.all-opt) input').forEach((cb, i) => cb.checked = benchMarkets.has(opts[i]));
+    if (benchReady()) renderBench();
+  }
 }
 
 // ── Units: one pooled value per client (so a client with 8 market accounts counts once)
@@ -1196,7 +1234,7 @@ function peerUnits(f, month, { includeCurrent = false, ignore = [] } = {}){
 }
 function clientUnit(f, month){
   if (!currentClient) return null;
-  const accts = clientAccounts(currentClient).filter(a => (!f.market || a.market === f.market) && B.data[a.id]);
+  const accts = clientAccounts(currentClient).filter(a => (!f.markets.length || f.markets.includes(a.market)) && B.data[a.id]);
   if (!accts.length) return null;
   const t = zero(); accts.forEach(a => addTo(t, acctTotals(a.id, f, month)));
   return derive(t);
@@ -1209,15 +1247,19 @@ function qualifies(u, m, monthly){
   if (m.need === 'clk') return u.clicks > 0;
   return u.purchases >= minP;
 }
-function quantile(sorted, q){
-  if (!sorted.length) return null;
-  const pos = (sorted.length - 1) * q, lo = Math.floor(pos), hi = Math.ceil(pos);
-  return sorted[lo] + (sorted[hi] - sorted[lo]) * (pos - lo);
-}
+// Every figure shown blends several clients, so no single client's result is ever displayed:
+//   avg  = simple average of peer clients (each client counts once)
+//   lo/hi = average of the lower half / upper half of peers (middle peer left out when the count is odd);
+//           only shown when each half holds at least CONFIG.MIN_PER_HALF clients
+const mean = a => a.length ? a.reduce((s, x) => s + x, 0) / a.length : null;
 function stats(units, m, monthly){
   const vals = units.filter(u => qualifies(u, m, monthly)).map(u => u[m.k]).sort((a,b) => a-b);
-  return { n: vals.length, vals, p10: quantile(vals,.1), p25: quantile(vals,.25), p50: quantile(vals,.5), p75: quantile(vals,.75), p90: quantile(vals,.9) };
+  const half = Math.floor(vals.length / 2), hasRange = half >= CONFIG.MIN_PER_HALF;
+  return { n: vals.length, vals, avg: mean(vals),
+    lo: hasRange ? mean(vals.slice(0, half)) : null,
+    hi: hasRange ? mean(vals.slice(vals.length - half)) : null };
 }
+function rangeText(st, m){ return st.lo == null ? '<span class="hint">needs ' + (CONFIG.MIN_PER_HALF * 2) + '+ peers</span>' : m.f(st.lo) + ' – ' + m.f(st.hi); }
 // share of peers the client beats (direction-aware), ties count half
 function beatShare(v, vals, lower){
   if (v == null || !vals.length) return null;
@@ -1241,7 +1283,7 @@ function renderBench(){
     `<span class="pill">Loaded ${B.loadedAt.toLocaleTimeString('en-GB', {hour:'2-digit', minute:'2-digit'})}</span>`,
   ].join('');
 
-  let h = `<thead><tr><th>Metric</th><th data-r>${esc(currentClient || 'Client')}</th><th data-r>P25</th><th data-r>Median</th><th data-r>P75</th><th>Position <span class="hint" style="text-transform:none;letter-spacing:0">(right = better)</span></th><th>Verdict</th><th data-r>Peers</th></tr></thead><tbody>`;
+  let h = `<thead><tr><th>Metric</th><th data-r>${esc(currentClient || 'Client')}</th><th data-r>Peer average</th><th data-r>Typical range</th><th>Position <span class="hint" style="text-transform:none;letter-spacing:0">(right = better)</span></th><th>Verdict</th><th data-r>Peers</th></tr></thead><tbody>`;
   BMETRICS.forEach(m => {
     const st = stats(peers, m, false);
     const cv = me && qualifies(me, m, false) ? me[m.k] : (me ? me[m.k] : null);
@@ -1253,12 +1295,12 @@ function renderBench(){
     else { const pct = Math.round(share * 100); verdict = pct >= 100 ? 'Ahead of every peer' : pct <= 0 ? 'Behind every peer' : `Better than ${pct}% of peers`; vcls = pct >= 60 ? 'good' : pct <= 40 ? 'bad' : 'mid'; }
     h += `<tr><td><strong>${m.l}</strong>${m.lower ? ' <span class="hint">lower is better</span>' : ''}</td>
       <td data-r><strong>${m.f(cv)}</strong></td>
-      <td data-r>${enough ? m.f(st.p25) : '—'}</td><td data-r>${enough ? m.f(st.p50) : '—'}</td><td data-r>${enough ? m.f(st.p75) : '—'}</td>
+      <td data-r>${enough ? m.f(st.avg) : '—'}</td><td data-r>${enough ? rangeText(st, m) : '—'}</td>
       <td>${enough ? posBar(st, cv, m) : ''}</td>
       <td class="verdict ${vcls}">${verdict}</td><td data-r>${st.n}</td></tr>`;
   });
   $('bench-table').innerHTML = h + '</tbody>';
-  $('bench-rules').textContent = `Each peer is one client, pooled across its accounts that match the filters. A peer counts if it spent at least £${fmt(CONFIG.MIN_SPEND_GBP)} in the period, plus at least ${CONFIG.MIN_PURCHASES} purchases for purchase metrics. A benchmark only shows when ${CONFIG.MIN_CLIENTS}+ peers qualify. Peer names are never shown.`;
+  $('bench-rules').textContent = `Each peer is one client, pooled across its accounts that match the filters. A peer counts if it spent at least £${fmt(CONFIG.MIN_SPEND_GBP)} in the period, plus at least ${CONFIG.MIN_PURCHASES} purchases for purchase metrics. A benchmark only shows when ${CONFIG.MIN_CLIENTS}+ peers qualify. Peer average is the simple average of peer clients (each client counts once). Typical range runs from the average of the lower half of peers to the average of the upper half, shown once there are ${CONFIG.MIN_PER_HALF * 2}+ peers. No figure is a single client's result, and peer names are never shown.`;
 
   buildTrendMetricOptions();
   renderTrend();
@@ -1267,17 +1309,18 @@ function renderBench(){
 
 function posBar(st, v, m){
   const W = 180, H = 22, pad = 6;
-  let lo = Math.min(st.p10, v ?? st.p10), hi = Math.max(st.p90, v ?? st.p90);
+  const pts = [st.avg, st.lo, st.hi, v].filter(x => x != null);
+  let lo = Math.min(...pts), hi = Math.max(...pts);
   if (hi === lo) { hi = lo + 1; }
   const span = hi - lo; lo -= span * 0.05; hi += span * 0.05;
   const x = val => pad + (W - pad*2) * (m.lower ? (hi - val) / (hi - lo) : (val - lo) / (hi - lo)); // right = better
-  const x25 = x(st.p25), x75 = x(st.p75);
-  const bx = Math.min(x25, x75), bw = Math.max(2, Math.abs(x75 - x25));
-  const tip = `P25 ${m.f(st.p25)} · median ${m.f(st.p50)} · P75 ${m.f(st.p75)}${v != null ? ' · client ' + m.f(v) : ''} (right = better)`;
+  const hasR = st.lo != null, xa = hasR ? x(st.lo) : 0, xb = hasR ? x(st.hi) : 0;
+  const bx = Math.min(xa, xb), bw = Math.max(2, Math.abs(xb - xa));
+  const tip = `Peer average ${m.f(st.avg)}${hasR ? ' · typical range ' + m.f(st.lo) + ' – ' + m.f(st.hi) : ''}${v != null ? ' · client ' + m.f(v) : ''} (right = better)`;
   return `<svg class="pos-svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" role="img" aria-label="${esc(tip)}"><title>${esc(tip)}</title>
     <line x1="${pad}" x2="${W-pad}" y1="${H/2}" y2="${H/2}" stroke="var(--border2)" stroke-width="2" stroke-linecap="round"/>
-    <rect x="${bx}" y="${H/2-5}" width="${bw}" height="10" rx="4" fill="var(--band)"/>
-    <line x1="${x(st.p50)}" x2="${x(st.p50)}" y1="${H/2-7}" y2="${H/2+7}" stroke="var(--series-peer)" stroke-width="2"/>
+    ${hasR ? `<rect x="${bx}" y="${H/2-5}" width="${bw}" height="10" rx="4" fill="var(--band)"/>` : ''}
+    <line x1="${x(st.avg)}" x2="${x(st.avg)}" y1="${H/2-7}" y2="${H/2+7}" stroke="var(--series-peer)" stroke-width="2"/>
     ${v != null ? `<circle cx="${x(v)}" cy="${H/2}" r="5" fill="var(--series-client)" stroke="var(--bg)" stroke-width="2"/>` : ''}
   </svg>`;
 }
@@ -1298,7 +1341,7 @@ function trendSeries(){
   const pts = B.months.map(mo => {
     const st = stats(peerUnits(f, mo), m, true), me = clientUnit(f, mo);
     const ok = st.n >= CONFIG.MIN_CLIENTS;
-    return { month: mo, n: st.n, p25: ok ? st.p25 : null, p50: ok ? st.p50 : null, p75: ok ? st.p75 : null, client: me && me.spend > 0 ? me[m.k] : null };
+    return { month: mo, n: st.n, p25: ok ? st.lo : null, p50: ok ? st.avg : null, p75: ok ? st.hi : null, client: me && me.spend > 0 ? me[m.k] : null };
   });
   return { m, pts };
 }
@@ -1334,14 +1377,14 @@ function renderTrend(){
   let lyC = lc >= 0 ? Y(pts[lc].client) : null, lyM = lm >= 0 ? Y(pts[lm].p50) : null;
   if (lyC != null && lyM != null && Math.abs(lyC - lyM) < 14) { if (lyC < lyM) { lyC -= 7; lyM += 7; } else { lyC += 7; lyM -= 7; } }
 
-  let svg = `<svg width="100%" viewBox="0 0 ${W} ${H}" role="img" aria-label="${esc(m.l)} by month: client vs peer median">`;
+  let svg = `<svg width="100%" viewBox="0 0 ${W} ${H}" role="img" aria-label="${esc(m.l)} by month: client vs peer average">`;
   ticks.forEach(t => { svg += `<line x1="${L}" x2="${W-R}" y1="${Y(t)}" y2="${Y(t)}" stroke="var(--border)"/><text x="${L-8}" y="${Y(t)+4}" text-anchor="end" font-size="11" fill="var(--muted)">${m.f(t)}</text>`; });
   pts.forEach((p, i) => { if (n <= 12 || i % 2 === 0) svg += `<text x="${X(i)}" y="${H-10}" text-anchor="middle" font-size="11" fill="var(--muted)">${monthLabel(p.month)}</text>`; });
   svg += band;
   seg('p50').forEach(r => { svg += `<path d="${path(r)}" fill="none" stroke="var(--series-peer)" stroke-width="2" stroke-dasharray="5 4"/>`; r.forEach(p => svg += `<circle cx="${p[0]}" cy="${p[1]}" r="4" fill="var(--series-peer)" stroke="var(--surface)" stroke-width="2"/>`); });
   seg('client').forEach(r => { svg += `<path d="${path(r)}" fill="none" stroke="var(--series-client)" stroke-width="2"/>`; r.forEach(p => svg += `<circle cx="${p[0]}" cy="${p[1]}" r="4.5" fill="var(--series-client)" stroke="var(--surface)" stroke-width="2"/>`); });
   if (lc >= 0) svg += `<text x="${X(lc)+10}" y="${lyC+4}" font-size="11" font-weight="600" fill="var(--ink)">${esc((currentClient || 'Client').slice(0, 14))}</text>`;
-  if (lm >= 0) svg += `<text x="${X(lm)+10}" y="${lyM+4}" font-size="11" fill="var(--muted)">Peer median</text>`;
+  if (lm >= 0) svg += `<text x="${X(lm)+10}" y="${lyM+4}" font-size="11" fill="var(--muted)">Peer average</text>`;
   pts.forEach((p, i) => { const w = n > 1 ? step : W - L - R; svg += `<rect class="hit" data-i="${i}" x="${X(i) - w/2}" y="${T}" width="${w}" height="${H-T-Bm}" fill="transparent"/>`; });
   svg += '</svg>';
   box.innerHTML = svg;
@@ -1350,7 +1393,7 @@ function renderTrend(){
   box.querySelectorAll('.hit').forEach(r => {
     r.addEventListener('mousemove', e => {
       const p = pts[+r.dataset.i];
-      tip.innerHTML = `<b>${monthLabel(p.month)}</b><div class="row"><span>${esc(currentClient || 'Client')}</span><span>${m.f(p.client)}</span></div><div class="row"><span>Peer median</span><span>${m.f(p.p50)}</span></div><div class="row"><span>P25–P75</span><span>${p.p25 != null ? m.f(p.p25) + ' – ' + m.f(p.p75) : '—'}</span></div><div class="row"><span>Peers</span><span>${p.n}${p.n < CONFIG.MIN_CLIENTS ? ' (too few)' : ''}</span></div>`;
+      tip.innerHTML = `<b>${monthLabel(p.month)}</b><div class="row"><span>${esc(currentClient || 'Client')}</span><span>${m.f(p.client)}</span></div><div class="row"><span>Peer average</span><span>${m.f(p.p50)}</span></div><div class="row"><span>Typical range</span><span>${p.p25 != null ? m.f(p.p25) + ' – ' + m.f(p.p75) : '—'}</span></div><div class="row"><span>Peers</span><span>${p.n}${p.n < CONFIG.MIN_CLIENTS ? ' (too few)' : ''}</span></div>`;
       const cr = card.getBoundingClientRect();
       let x = e.clientX - cr.left + 14; if (x > cr.width - 190) x = e.clientX - cr.left - 190;
       tip.style.left = x + 'px'; tip.style.top = (e.clientY - cr.top + 10) + 'px'; tip.style.display = 'block';
@@ -1358,8 +1401,8 @@ function renderTrend(){
     r.addEventListener('mouseleave', () => tip.style.display = 'none');
   });
 
-  $('trend-table').innerHTML = `<div class="table-wrap"><table><thead><tr><th>Month</th><th data-r>${esc(currentClient || 'Client')}</th><th data-r>P25</th><th data-r>Median</th><th data-r>P75</th><th data-r>Peers</th></tr></thead><tbody>` +
-    pts.map(p => `<tr><td>${monthLabel(p.month)}</td><td data-r>${m.f(p.client)}</td><td data-r>${m.f(p.p25)}</td><td data-r>${m.f(p.p50)}</td><td data-r>${m.f(p.p75)}</td><td data-r>${p.n}</td></tr>`).join('') + '</tbody></table></div>';
+  $('trend-table').innerHTML = `<div class="table-wrap"><table><thead><tr><th>Month</th><th data-r>${esc(currentClient || 'Client')}</th><th data-r>Peer average</th><th data-r>Lower-half avg</th><th data-r>Upper-half avg</th><th data-r>Peers</th></tr></thead><tbody>` +
+    pts.map(p => `<tr><td>${monthLabel(p.month)}</td><td data-r>${m.f(p.client)}</td><td data-r>${m.f(p.p50)}</td><td data-r>${m.f(p.p25)}</td><td data-r>${m.f(p.p75)}</td><td data-r>${p.n}</td></tr>`).join('') + '</tbody></table></div>';
 }
 window.addEventListener('resize', () => { if (benchReady() && currentView === 'bench') renderTrend(); });
 
@@ -1370,7 +1413,7 @@ function renderIndustryTable(f){
   let h = `<thead><tr><th>Industry</th><th data-r>Clients</th>${BMETRICS.map(m => `<th data-r>${m.l}</th>`).join('')}</tr></thead><tbody>`;
   inds.forEach(ind => {
     const units = peerUnits({ ...f, industry: ind, sub: '' }, null, { includeCurrent: true });
-    const cells = BMETRICS.map(m => { const st = stats(units, m, false); return `<td data-r>${st.n >= CONFIG.MIN_CLIENTS ? m.f(st.p50) : '<span class="hint">—</span>'}</td>`; }).join('');
+    const cells = BMETRICS.map(m => { const st = stats(units, m, false); return `<td data-r>${st.n >= CONFIG.MIN_CLIENTS ? m.f(st.avg) : '<span class="hint">—</span>'}</td>`; }).join('');
     h += `<tr class="click${myInd.includes(ind) ? ' hl' : ''}" data-ind="${esc(ind)}"><td>${esc(ind)}</td><td data-r>${units.length}</td>${cells}</tr>`;
   });
   $('industry-table').innerHTML = h + '</tbody>';
