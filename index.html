@@ -553,10 +553,19 @@ async function loadSheet(){
   S.loadedAt = new Date();
 }
 
+const ACCT_FIELDS_BASIC = 'account_id,name,currency,account_status';
+let ACCT_FIELDS = ACCT_FIELDS_BASIC + ',business{name}';
 async function loadMetaAccounts(){
   META.byId = {}; META.listed = []; META.listError = null;
   try {
-    const list = await fetchAllPages('me/adaccounts', { fields: 'account_id,name,currency,account_status,business{name}', limit: 200 });
+    // business{name} needs the business_management permission; fall back without it
+    let list;
+    try { list = await fetchAllPages('me/adaccounts', { fields: ACCT_FIELDS, limit: 200 }); }
+    catch(e) {
+      if (!/business_management/i.test(e.message) || ACCT_FIELDS === ACCT_FIELDS_BASIC) throw e;
+      ACCT_FIELDS = ACCT_FIELDS_BASIC; META.noBusiness = true;
+      list = await fetchAllPages('me/adaccounts', { fields: ACCT_FIELDS, limit: 200 });
+    }
     list.forEach(a => {
       META.byId[a.account_id] = { name: a.name, currency: a.currency, status: a.account_status, business: a.business?.name || '', listed: true };
       META.listed.push(a.account_id);
@@ -565,7 +574,7 @@ async function loadMetaAccounts(){
   const missing = S.accounts.filter(a => !META.byId[a.id]);
   await pool(missing, CONFIG.CONCURRENCY, async a => {
     try {
-      const j = await graphGet('act_' + a.id, { fields: 'account_id,name,currency,account_status,business{name}' });
+      const j = await graphGet('act_' + a.id, { fields: ACCT_FIELDS });
       META.byId[a.id] = { name: j.name, currency: j.currency, status: j.account_status, business: j.business?.name || '', listed: false };
     } catch(e) { META.byId[a.id] = { error: e.message }; }
   });
@@ -1489,7 +1498,7 @@ function renderSetup(){
         <button class="btn ghost" id="forget-files">Forget files</button>
       </div>
       <div class="hint" id="csv-msg" style="margin-top:6px">Pick accounts.csv and fx.csv together. They stay in this browser only and are never uploaded.</div></div>
-    <div class="card"><div class="s-label">Meta access</div>${TOKEN ? `<div class="s-value">${META.listed.length} accounts visible</div><div class="hint">Token loaded for this browser tab.</div>${META.listError ? `<div class="hint cf-red">${esc(META.listError)}</div>` : ''}` : '<div class="cf-red">No token.</div>'}
+    <div class="card"><div class="s-label">Meta access</div>${TOKEN ? `<div class="s-value">${META.listed.length} accounts visible</div><div class="hint">Token loaded for this browser tab.</div>${META.noBusiness ? '<div class="hint cf-yellow">Token has no business_management permission, so client names are guessed from account names only.</div>' : ''}${META.listError ? `<div class="hint cf-red">${esc(META.listError)}</div>` : ''}` : '<div class="cf-red">No token.</div>'}
       <div style="margin-top:10px;display:flex;gap:6px"><input class="ctl" id="token-input" type="password" placeholder="Paste a new access token"/><button class="btn ghost" id="token-save">Use</button></div></div>
     <div class="card"><div class="s-label">Benchmark-ready</div><div class="s-value">${nElig} accounts</div><div class="hint">Complete in the sheet, included, readable by the token, and with an FX rate.</div></div>
   </div>`;
