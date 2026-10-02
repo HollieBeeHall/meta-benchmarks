@@ -350,7 +350,8 @@ const CONFIG = {
   AGENCY_BUSINESS_NAMES: ['This is GAIN'],  // owning businesses that are us, not the client
   SUGGEST_DAYS: 90,            // look-back for suggested market / model / AOV band
   MARKET_SHARE: 0.75,          // top country needs this share of spend, else Multi-market
-  MIN_CLIENTS: 5,              // hide a benchmark unless at least this many peer clients qualify
+  MIN_CLIENTS: 4,              // hide a benchmark unless at least this many peer clients qualify
+  IN_LINE_BAND: 0.05,          // within ±5% of the peer average reads as "in line"
   MIN_PER_HALF: 2,             // typical range needs this many clients in each half (so 4+ peers)
   MIN_SPEND_GBP: 500,          // a peer needs this much spend in the period to count
   MIN_PURCHASES: 5,           // ...and this many purchases for purchase-based metrics
@@ -1313,7 +1314,17 @@ function renderBench(){
       verdict = `Not enough peers (${st.n} of ${CONFIG.MIN_CLIENTS} needed)${why ? `<div class="hint">${why}</div>` : ''}`;
     }
     else if (cv == null) verdict = 'No client data';
-    else { const pct = Math.round(share * 100); verdict = pct >= 100 ? 'Ahead of every peer' : pct <= 0 ? 'Behind every peer' : `Better than ${pct}% of peers`; vcls = pct >= 60 ? 'good' : pct <= 40 ? 'bad' : 'mid'; }
+    else {
+      // Headline: client vs peer average, direction-aware (lower is better for costs)
+      const diff = st.avg ? (cv - st.avg) / st.avg : 0;
+      const better = m.lower ? diff < 0 : diff > 0;
+      const pctTxt = Math.round(Math.abs(diff) * 100);
+      if (Math.abs(diff) < CONFIG.IN_LINE_BAND) { verdict = 'In line with peer average'; vcls = 'mid'; }
+      else { verdict = `${pctTxt}% ${better ? 'better' : 'worse'} than peer average`; vcls = better ? 'good' : 'bad'; }
+      // Supporting detail: how many peers the client beats
+      const beats = Math.round(share * st.n);
+      verdict += `<div class="hint">Beats ${beats} of ${st.n} peers</div>`;
+    }
     h += `<tr><td><strong>${m.l}</strong>${m.lower ? ' <span class="hint">lower is better</span>' : ''}</td>
       <td data-r><strong>${m.f(cv)}</strong></td>
       <td data-r>${enough ? m.f(st.avg) : '—'}</td><td data-r>${enough ? rangeText(st, m) : '—'}</td>
