@@ -312,7 +312,7 @@
       </div>
 
       <h3 class="sec"><strong>Industry</strong> <em>overview</em></h3>
-      <p class="hint" style="margin-bottom:8px">Average client by industry, using the market, model, AOV and objective filters above. Includes every client. Click a row to filter to that industry.</p>
+      <p class="hint" style="margin-bottom:8px">Average client by industry, using the market, model, AOV and objective filters above. Unlike the table above, this includes the selected client. "Qualifying clients" is how many meet the minimum spend, out of all clients with any spend; purchase metrics also need a minimum number of purchases, so they can have fewer. Click a row to filter to that industry.</p>
       <div class="table-wrap"><table id="industry-table"></table></div>
     </div>
   </div>
@@ -353,7 +353,7 @@ const CONFIG = {
   MIN_CLIENTS: 5,              // hide a benchmark unless at least this many peer clients qualify
   MIN_PER_HALF: 2,             // typical range needs this many clients in each half (so 4+ peers)
   MIN_SPEND_GBP: 500,          // a peer needs this much spend in the period to count
-  MIN_PURCHASES: 10,           // ...and this many purchases for purchase-based metrics
+  MIN_PURCHASES: 5,           // ...and this many purchases for purchase-based metrics
   MIN_SPEND_GBP_MONTH: 200,    // monthly trend: per-month minimums
   MIN_PURCHASES_MONTH: 5,
   CONCURRENCY: 5,              // parallel Meta requests
@@ -1246,7 +1246,7 @@ function peerUnits(f, month, { includeCurrent = false, ignore = [] } = {}){
     if (!matchAttrs(a, f, ignore)) return;
     addTo(byClient[a.client] || (byClient[a.client] = zero()), acctTotals(a.id, f, month));
   });
-  return Object.entries(byClient).map(([client, t]) => ({ client, ...derive(t) }));
+  return Object.entries(byClient).filter(([, t]) => t.spend > 0).map(([client, t]) => ({ client, ...derive(t) }));
 }
 function clientUnit(f, month){
   if (!currentClient) return null;
@@ -1293,7 +1293,7 @@ function renderBench(){
   const nErr = Object.keys(B.errors).length;
   $('bench-meta').innerHTML = [
     `<span class="pill">${B.since} → ${B.until}</span>`,
-    `<span class="pill">${peers.length} peer client${peers.length === 1 ? '' : 's'} match the filters</span>`,
+    `<span class="pill">${peers.length} peer client${peers.length === 1 ? '' : 's'} with spend in these filters</span>`,
     `<span class="pill">7-day click + 1-day view · GBP</span>`,
     nErr ? `<span class="pill bad">${nErr} account${nErr === 1 ? '' : 's'} failed to load: see Setup</span>` : '',
     `<span class="pill">Loaded ${B.loadedAt.toLocaleTimeString('en-GB', {hour:'2-digit', minute:'2-digit'})}</span>`,
@@ -1306,7 +1306,12 @@ function renderBench(){
     const enough = st.n >= CONFIG.MIN_CLIENTS;
     const share = enough ? beatShare(cv, st.vals, m.lower) : null;
     let verdict = '', vcls = 'mid';
-    if (!enough) verdict = `Not enough peers (${st.n} of ${CONFIG.MIN_CLIENTS} needed)`;
+    if (!enough) {
+      const lowSpend = peers.filter(u => u.spend < CONFIG.MIN_SPEND_GBP).length;
+      const lowPur = m.need === 'pur' ? peers.filter(u => u.spend >= CONFIG.MIN_SPEND_GBP && u.purchases < CONFIG.MIN_PURCHASES).length : 0;
+      const why = [lowSpend ? `${lowSpend} under £${fmt(CONFIG.MIN_SPEND_GBP)} spend` : '', lowPur ? `${lowPur} under ${CONFIG.MIN_PURCHASES} purchases` : ''].filter(Boolean).join(', ');
+      verdict = `Not enough peers (${st.n} of ${CONFIG.MIN_CLIENTS} needed)${why ? `<div class="hint">${why}</div>` : ''}`;
+    }
     else if (cv == null) verdict = 'No client data';
     else { const pct = Math.round(share * 100); verdict = pct >= 100 ? 'Ahead of every peer' : pct <= 0 ? 'Behind every peer' : `Better than ${pct}% of peers`; vcls = pct >= 60 ? 'good' : pct <= 40 ? 'bad' : 'mid'; }
     h += `<tr><td><strong>${m.l}</strong>${m.lower ? ' <span class="hint">lower is better</span>' : ''}</td>
@@ -1426,11 +1431,11 @@ window.addEventListener('resize', () => { if (benchReady() && currentView === 'b
 function renderIndustryTable(f){
   const myInd = currentClient ? uniq('industry', clientAccounts(currentClient)) : [];
   const inds = uniq('industry');
-  let h = `<thead><tr><th>Industry</th><th data-r>Clients</th>${BMETRICS.map(m => `<th data-r>${m.l}</th>`).join('')}</tr></thead><tbody>`;
+  let h = `<thead><tr><th>Industry</th><th data-r>Qualifying clients</th>${BMETRICS.map(m => `<th data-r>${m.l}</th>`).join('')}</tr></thead><tbody>`;
   inds.forEach(ind => {
     const units = peerUnits({ ...f, industry: ind, sub: '' }, null, { includeCurrent: true });
     const cells = BMETRICS.map(m => { const st = stats(units, m, false); return `<td data-r>${st.n >= CONFIG.MIN_CLIENTS ? m.f(st.avg) : '<span class="hint">—</span>'}</td>`; }).join('');
-    h += `<tr class="click${myInd.includes(ind) ? ' hl' : ''}" data-ind="${esc(ind)}"><td>${esc(ind)}</td><td data-r>${units.length}</td>${cells}</tr>`;
+    h += `<tr class="click${myInd.includes(ind) ? ' hl' : ''}" data-ind="${esc(ind)}"><td>${esc(ind)}</td><td data-r title="Clients with £${fmt(CONFIG.MIN_SPEND_GBP)}+ spend, out of all clients with any spend">${units.filter(u => u.spend >= CONFIG.MIN_SPEND_GBP).length} <span class="hint">of ${units.length}</span></td>${cells}</tr>`;
   });
   $('industry-table').innerHTML = h + '</tbody>';
   $('industry-table').querySelectorAll('tr[data-ind]').forEach(tr => tr.addEventListener('click', () => {
