@@ -362,7 +362,7 @@ const CONFIG = {
 
 const BASE = `https://graph.facebook.com/${CONFIG.GRAPH_VERSION}`;
 const PURCHASE_TYPES = ['omni_purchase', 'purchase', 'offsite_conversion.fb_pixel_purchase'];
-const REQUIRED = ['client', 'industry', 'model', 'market'];
+const REQUIRED = ['client', 'industry', 'model'];  // market is optional: benchmarks use delivery country
 const REQUIRED_LABEL = { client: 'client', industry: 'industry', model: 'business_model', market: 'market' };
 const FILTER_KEYS = ['campaign','creative','format','copy','lp','product','batch','creatorType'];
 
@@ -1084,7 +1084,7 @@ function benchFetchList(){
 async function loadBench(force = false){
   if (!TOKEN) { benchStatus('No access token. Add one on the Setup tab.', true); return; }
   const n = Number($('bf-period').value), { since, until } = benchPeriod(n);
-  const key = `mb_bench_${since}_${until}_${CONFIG.ATTRIBUTION.join('+')}`;
+  const key = `mb_bench_v2_${since}_${until}_${CONFIG.ATTRIBUTION.join('+')}`;  // v2: split by delivery country
   const ids = benchFetchList();
   if (!ids.length) { benchStatus('No accounts are ready for benchmarking yet. Check the Setup tab.', true); return; }
 
@@ -1102,14 +1102,16 @@ async function loadBench(force = false){
       const rows = await fetchAllPages(`act_${id}/insights`, {
         level: 'campaign', time_increment: 'monthly',
         time_range: JSON.stringify({ since, until }),
+        breakdowns: 'country',
         fields: 'campaign_id,objective,date_start,spend,impressions,inline_link_clicks,actions,action_values',
         ...ATTR_PARAMS, limit: 500,
       });
-      // compact: sum campaigns into account × month × objective (local currency)
+      // compact: sum campaigns into account × month × objective × delivery country (local currency)
       const agg = {};
       rows.forEach(r => {
-        const k = r.date_start.slice(0,7) + '|' + (r.objective || 'UNKNOWN');
-        if (!agg[k]) agg[k] = { month: r.date_start.slice(0,7), objective: r.objective || 'UNKNOWN', ...zero() };
+        const country = countryToMarket(r.country);
+        const k = r.date_start.slice(0,7) + '|' + (r.objective || 'UNKNOWN') + '|' + country;
+        if (!agg[k]) agg[k] = { month: r.date_start.slice(0,7), objective: r.objective || 'UNKNOWN', country, ...zero() };
         addTo(agg[k], { spend: parseFloat(r.spend) || 0, impressions: parseInt(r.impressions) || 0, clicks: parseInt(r.inline_link_clicks) || 0,
           purchases: actionVal(r.actions, PURCHASE_TYPES), revenue: actionVal(r.action_values, PURCHASE_TYPES) });
       });
@@ -1120,6 +1122,7 @@ async function loadBench(force = false){
   btn.disabled = false; btn.textContent = 'Refresh benchmarks';
   store.set(key, { data, errors, savedAt: fresh ? fresh.savedAt : Date.now() });
   Object.assign(B, { key, since, until, data, errors, loadedAt: new Date(), months: monthsBetween(since, until) });
+  buildMarketMulti(dataCountries());
   buildObjectiveOptions();
   renderBench();
 }
@@ -1134,9 +1137,18 @@ function fillSelect(id, values, allLabel, keep){
   if (prev != null && values.includes(prev)) el.value = prev;
 }
 function uniq(key, rows = S.accounts){ return [...new Set(rows.map(a => a[key]).filter(Boolean))].sort((a,b) => a.localeCompare(b)); }
+// Meta reports the country ads were delivered in (ISO code); the sheet uses UK for Great Britain
+function countryToMarket(c){ const u = (c || '').toUpperCase(); return u === 'GB' ? 'UK' : (u || 'Unknown'); }
+// Markets to offer: countries found in the loaded data, ordered by total spend
+function dataCountries(){
+  const sp = {};
+  Object.entries(B.data).forEach(([id, rows]) => { const r8 = rateFor(id) || 0; rows.forEach(r => sp[r.country] = (sp[r.country] || 0) + r.spend * r8); });
+  return Object.keys(sp).filter(c => sp[c] > 0).sort((a,b) => sp[b] - sp[a]);
+}
+function marketOptions(){ return benchReady() ? dataCountries() : []; }
 function buildBenchFilterOptions(){
   fillSelect('bf-industry', uniq('industry'), 'All industries', true);
-  buildMarketMulti(uniq('market'));
+  buildMarketMulti(marketOptions());
   fillSelect('bf-model', uniq('model'), 'All models', true);
   fillSelect('bf-aov', uniq('aov'), 'All AOV bands', true);
   buildSubOptions(true);
@@ -1164,7 +1176,7 @@ function resetBenchFiltersForClient(){
   pick('bf-industry', first ? one('industry') : '');
   buildSubOptions(false);
   pick('bf-sub', '');
-  benchMarkets.clear(); buildMarketMulti(uniq('market'));
+  benchMarkets.clear(); buildMarketMulti(marketOptions());
   pick('bf-model', first ? one('model') : '');
   pick('bf-aov', '');
 }
@@ -1175,9 +1187,10 @@ function resetBenchFiltersForClient(){
 function benchFilters(){
   return { industry: $('bf-industry').value, sub: $('bf-sub').value, markets: [...benchMarkets], model: $('bf-model').value, aov: $('bf-aov').value, objective: $('bf-objective').value };
 }
+// Market is not an account attribute here: each account's data is split by delivery country,
+// so the market filter is applied to the rows (see acctTotals), not to whole accounts.
 function matchAttrs(a, f, ignore = []){
-  return ['industry','sub','model','aov'].every(k => ignore.includes(k) || !f[k] || a[k] === f[k])
-    && (ignore.includes('market') || !f.markets.length || f.markets.includes(a.market));
+  return ['industry','sub','model','aov'].every(k => ignore.includes(k) || !f[k] || a[k] === f[k]);
 }
 
 // ── Market multi-select (empty = all markets)
@@ -1201,6 +1214,7 @@ function buildMarketMulti(opts){
   all.innerHTML = `<input type="checkbox" ${benchMarkets.size ? '' : 'checked'}/><span>All markets</span>`;
   all.querySelector('input').onchange = () => { benchMarkets.clear(); refresh(); };
   dd.appendChild(all);
+  if (!opts.length) { const n = document.createElement('div'); n.className = 'ms-option'; n.style.color = 'var(--muted)'; n.textContent = 'Load benchmarks to pick markets'; dd.appendChild(n); }
   opts.forEach(o => {
     const d = document.createElement('label'); d.className = 'ms-option';
     d.innerHTML = `<input type="checkbox" ${benchMarkets.has(o) ? 'checked' : ''}/><span>${flagFor(o)} ${esc(o)}</span>`;
@@ -1219,7 +1233,9 @@ function buildMarketMulti(opts){
 // ── Units: one pooled value per client (so a client with 8 market accounts counts once)
 function acctTotals(id, f, month){
   const rate = rateFor(id); const t = zero(); if (rate == null) return t;
-  (B.data[id] || []).forEach(r => { if ((!f.objective || r.objective === f.objective) && (!month || r.month === month)) addTo(t, r, rate); });
+  (B.data[id] || []).forEach(r => {
+    if ((!f.objective || r.objective === f.objective) && (!month || r.month === month) && (!f.markets.length || f.markets.includes(r.country))) addTo(t, r, rate);
+  });
   return t;
 }
 function peerUnits(f, month, { includeCurrent = false, ignore = [] } = {}){
@@ -1234,10 +1250,10 @@ function peerUnits(f, month, { includeCurrent = false, ignore = [] } = {}){
 }
 function clientUnit(f, month){
   if (!currentClient) return null;
-  const accts = clientAccounts(currentClient).filter(a => (!f.markets.length || f.markets.includes(a.market)) && B.data[a.id]);
+  const accts = clientAccounts(currentClient).filter(a => B.data[a.id]);
   if (!accts.length) return null;
   const t = zero(); accts.forEach(a => addTo(t, acctTotals(a.id, f, month)));
-  return derive(t);
+  return t.spend > 0 ? derive(t) : null;
 }
 function qualifies(u, m, monthly){
   const minS = monthly ? CONFIG.MIN_SPEND_GBP_MONTH : CONFIG.MIN_SPEND_GBP;
@@ -1300,7 +1316,7 @@ function renderBench(){
       <td class="verdict ${vcls}">${verdict}</td><td data-r>${st.n}</td></tr>`;
   });
   $('bench-table').innerHTML = h + '</tbody>';
-  $('bench-rules').textContent = `Each peer is one client, pooled across its accounts that match the filters. A peer counts if it spent at least £${fmt(CONFIG.MIN_SPEND_GBP)} in the period, plus at least ${CONFIG.MIN_PURCHASES} purchases for purchase metrics. A benchmark only shows when ${CONFIG.MIN_CLIENTS}+ peers qualify. Peer average is the simple average of peer clients (each client counts once). Typical range runs from the average of the lower half of peers to the average of the upper half, shown once there are ${CONFIG.MIN_PER_HALF * 2}+ peers. No figure is a single client's result, and peer names are never shown.`;
+  $('bench-rules').textContent = `Each peer is one client, pooled across its accounts that match the filters. Markets use the country each ad was delivered in, so a multi-country account only counts its spend and results in the markets selected. A peer counts if it spent at least £${fmt(CONFIG.MIN_SPEND_GBP)} in the period, plus at least ${CONFIG.MIN_PURCHASES} purchases for purchase metrics. A benchmark only shows when ${CONFIG.MIN_CLIENTS}+ peers qualify. Peer average is the simple average of peer clients (each client counts once). Typical range runs from the average of the lower half of peers to the average of the upper half, shown once there are ${CONFIG.MIN_PER_HALF * 2}+ peers. No figure is a single client's result, and peer names are never shown.`;
 
   buildTrendMetricOptions();
   renderTrend();
